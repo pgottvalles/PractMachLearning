@@ -1,0 +1,271 @@
+---
+title: "Practical Machine Learning assignment"
+author: "Patrick Gottvalles"
+date: "18.03.2016"
+output: html_document
+---
+
+##Summary
+
+This project analyzes data from fitness devices (Jawbone, Fitbit, etc.) to predict the manner in which participants are performing a specific movement. Six participants wore accelerometers on the belt, forearm, arm, and dumbbell. Rather than tracking frequency, the data attempts to tracking how well participants performed the activity.
+
+The goal of this project is to accurately predict whether or not the participant performed the activity correctly or incorrectly (the "class" variable) to allow real-time feedback to exercisers wearing training devices.
+
+For this project, the training data was split into a training and a test set. I cleaned and pre-processed the data. After performing some exploratory analysis, I subset the data and removed unnecessary variables. I then fit the relevant subset of the data using trees, random forests, and linear discrimination analysis. The random forests model resulted in the best fit. 
+
+
+##Data Source
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. 
+
+##Data Processing
+
+Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different manners ("classe"). Class "A" corresponds to correct execution of the exercise, while the other 4 classes correspond to common mistakes. According to the researchers, the sensors monitor the movements at a rate of 45Hz, and the data is separated into timed "windows."
+
+The data appears to be summarized by time series windows, including (min, max, mean, sd, var, avg). Due to the structure of the data set, these variables contain a high proportion of Na's. Because we're trying to predict the type of movement against a randomly drawn sample of observations (rather than a set sampled based on time windows), these summary variables are removed to avoid noise in the model. (See Appendix, **"Exploratory Analysis"**)
+
+##libraries load
+
+```{r}
+packages <- c("ggplot2", "caret", "data.table", "randomForest", "stats", "scales", "gridExtra")
+sapply(packages, require, character.only = TRUE, quietly = TRUE, warn = FALSE)
+```
+
+
+##Data Extraction
+
+```{r}
+setwd("/home/patrick/Documents/R_Work_Space/MachineLearning")
+raw_train_dat <- read.csv("pml-training.csv", na.strings=c("#DIV/0!", "", "NA"), strip.white=T, header=TRUE)
+raw_test_dat <- read.csv("pml-testing.csv", na.strings=c("#DIV/0!", "", "NA"), strip.white=T, header=TRUE)
+```
+
+##Data Cleaning
+Prediction model are very sensitive to null data and in this particular dataset we have variable were more than 80% of the values are missing.
+=> Let's then remove such columns
+
+```{r}
+dataset_row_nb<-dim(raw_train_dat)[1] # calculate the number of rows in the raw_train_dat dataset
+col_name_80p_na<-(colSums(is.na(raw_train_dat)) > 0.9*dataset_row_nb) # list columns were more thant 80% of the row are NA
+
+# remove such columns from both training and testing datasets
+raw_train_dat<-raw_train_dat[, !(col_name_80p_na)] 
+raw_test_dat<-raw_test_dat[, !(col_name_80p_na)] 
+```
+
+The first 7 columns are only for bookkeeping and therefore do not have any value for this exercice: Let's remove them accordingly
+
+```{r}
+#removing book keeping columns
+raw_train_dat<-raw_train_dat[, -c(1:7)]
+raw_test_dat<-raw_test_dat[, -c(1:7)]
+```
+
+##Exploratory Analysis
+There are so many different predictor that it is quite difficult to find any of them that could help identifying any visual trend
+```{r}
+featurePlot(x=raw_train_dat[,c("roll_belt","pitch_forearm","yaw_belt")],y=raw_train_dat$classe,plot="pairs")
+```
+
+##Data Analysis
+
+#Partition Data
+The original pml-training set is partitioned into two randomly sampled data sets: training (60%) and testing (40%). This testing set will be used to estimate the out-of-sample error rate to understand how well the model will apply to the validation set, the pml-testing data (ptest).
+
+```{r}
+set.seed(222) #sets the seed
+inTrain <- createDataPartition(y=raw_train_dat$classe,p=0.6, list=FALSE)
+training <- raw_train_dat[inTrain,]
+testing <- raw_train_dat[-inTrain,]
+```
+
+#Preprocessing
+The dataset is quite large and my laptop is quite old => better to try to get the most importatnt data at the first shot. For that we are going to use the **Principal Component analasys** method **(PCA)**
+
+```{r}
+col_classe_nb<-dim(training)[2] #calculate the # of columns in the dataset 
+preProc <- preProcess(training[,-col_classe_nb],method="pca",thresh=0.8) #preprocess the data in order to get 80% of the variance
+#Let's apply this preProc object to training and testing dataset
+trainPC<-predict(preProc,training)
+testPC<-predict(preProc,testing)
+```
+
+Note that after this pca preprocessing we only need `r preProc$numComp` components
+```{r}
+preProc
+```
+=>So we will reduce downward the amount of cpu needed for the model calculation
+
+#Model Selection
+The goal is to correctly predict the class of movement based on the data. Therefore a classification model is required. Some options include: Trees, Random Forests, and Linear Discriminant Analysis. I use 4-fold cross validation to limit bias, with parallel processing to save computational time.
+
+```{r}
+ctrl <- trainControl(allowParallel=T, method="cv", number=4)
+mod_rpart <- train(training$classe ~ ., data=trainPC, trControl=ctrl, method="rpart") 
+mod_rf <- train(training$classe ~ ., data=trainPC, trControl=ctrl, method="rf",ntree=150) #let's start with 150 tree for now
+mod_lda <- train(training$classe ~ ., data=trainPC, trControl=ctrl, method="lda")
+
+resamps <- resamples(list(rpart = mod_rpart, rf = mod_rf, lda = mod_lda))
+
+summary(resamps)$statistics$Accuracy
+```
+
+At first sight it seems that random forest model is the one that would give best accurancy.
+
+Note also that it seems 150 trees (as we have selected for the randome forest) is well enough to stabilize the error
+```{r}
+plot(mod_rf$finalModel,main="Error vs # of Trees")
+```
+
+
+Let's check that more closely by applying those model to the training dataset first
+rpart - Tree
+```{r}
+train_pred_rpart<-predict(mod_rpart,newdata=trainPC)
+train_acc_rpart<-confusionMatrix(train_pred_rpart,training$classe)$overall[1]
+train_acc_rpart
+```
+
+
+random forest
+```{r}
+train_pred_rf<-predict(mod_rf,newdata=trainPC)
+train_acc_rf<-confusionMatrix(train_pred_rf,training$classe)$overall[1]
+train_acc_rf
+```
+
+Linear Discrimination Analysis (LDA)
+```{r}
+train_pred_lda<-predict(mod_lda,newdata=trainPC)
+train_acc_lda<-confusionMatrix(train_pred_lda,training$classe)$overall[1]
+train_acc_lda
+```
+
+
+As we have suspected, the random forest algorythm is the one that gives the best result on the training set.
+=> let's see what is the siutation on the testing dataset. We will apply each model on the preprocessed testing dataset **testPC**
+
+Tree - rpart
+```{r}
+test_pred_rpart<-predict(mod_rpart,newdata=testPC)
+test_acc_rpart<-confusionMatrix(test_pred_rpart,testing$classe)$overall[1]
+test_acc_rpart
+```
+
+Random forest
+```{r}
+test_pred_rf<-predict(mod_rf,newdata=testPC)
+test_acc_rf<-confusionMatrix(test_pred_rf,testing$classe)$overall[1]
+test_acc_rf
+```
+
+LDA
+```{r}
+test_pred_lda<-predict(mod_lda,newdata=testPC)
+test_acc_lda<-confusionMatrix(test_pred_lda,testing$classe)$overall[1]
+test_acc_lda
+```
+
+
+=> Once again, the random forest seems to have the best accurancy
+
+
+##Data prediction on raw_test_dat dataset
+Lets see what it gives for the raw_test_data
+
+
+```{r}
+raw_test_dat_PC<-predict(preProc,raw_test_dat)
+raw_test_pred_rf<-predict(mod_rf,newdata=raw_test_dat_PC)
+raw_test_pred_rf
+```
+
+
+##Model Tunning
+
+The current random forest model is good but it quite slow, as shown the computation time is `r mod_rf$times$everything[1]`.
+
+```{r}
+mod_rf$times[1]
+```
+
+Therefore there would be need to see if we could get more efficiency in terms of perfermance.
+First let's plot the model and how it behaves
+
+```{r}
+plot(mod_rf)
+```
+As we have applied a pca processing to the dataset, It seems that with even 2 predictors we could have 94% of accurancy.
+ 
+ By using the varimp function we can get the most important predictors in the model
+
+let's plot the important variable of the model
+```{r}
+plot(varImp(mod_rf))
+```
+
+Seemes like taking the 6 most important predictors would give us a good accurancy/performance ration: Let's try it
+
+```{r}
+ImpMeasure<-data.frame(varImp(mod_rf)$importance)
+ImpMeasure$Vars<-row.names(ImpMeasure)
+ImpMeasure[order(-ImpMeasure$Overall),][1:6,]
+imp_pred<-ImpMeasure[order(-ImpMeasure$Overall),][1:6,]$Vars
+imp_pred
+```
+
+
+
+
+So the 2 most important predictors are `r imp_pred`.
+Let's build our new processed dataset trainPC and testPC
+
+```{r}
+
+new_trainPC<-cbind(trainPC[imp_pred],trainPC$classe)
+names(new_trainPC)<-c(imp_pred, "classe")
+new_testPC<-cbind(testPC[imp_pred],testPC$classe)
+names(new_testPC)<-c(imp_pred, "classe")
+```
+
+refit the model with the new dataset with randowm forest method
+
+```{r}
+new_mod_rf<-train(training$classe ~ ., data=new_trainPC, trControl=ctrl, method="rf",ntree=150)
+```
+
+and then calculate the accurancy
+```{r}
+test_new_pred_rf<-predict(new_mod_rf,newdata=new_testPC)
+test_new_acc_rf<-confusionMatrix(test_new_pred_rf,testing$classe)$overall[1]
+test_new_acc_rf
+
+```
+
+So the original random forest mode has the following accurancy and computation time
+* accurancy : `r test_acc_rf`
+* computation time : `r mod_rf$times$everything[1]`
+
+The newly tuned model has the accurancy and computation time as shown bellow:
+* accurancy : `r test_new_acc_rf`
+* computation time : `r new_mod_rf$times$everything[1]`
+
+
+we can see that we have accurancy variance of `r 100*(test_new_acc_rf-test_acc_rf)/test_acc_rf`%.
+
+But on the other side we have a gain of processing time of `r 100*(mod_rf$times$everything[1]-new_mod_rf$times[1]$everything[1])/mod_rf$times$everything[1]`%.    
+
+**=> Therfore we can be satisfied with this model tunning**
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
